@@ -1,104 +1,58 @@
-import { useState } from 'react';
-import translate from "translate";
-
-const ASS_HEADER = `[Script Info]
-Title: Bilingual Subtitles
-ScriptType: v4.00+
-WrapStyle: 0
-ScaledBorderAndShadow: Yes
-PlayResX: 1920
-PlayResY: 1080
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Noto Sans,70,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,35,1
-Style: Secondary,Noto Sans,55,&H003CF7F4,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,35,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-
-export default function Home() {
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [status, setStatus] = useState('等待上传...');
-  const [engine, setEngine] = useState('google'); // 'google' or 'deepseek'
-  const [apiKey, setApiKey] = useState('');
-
-  // DeepSeek 翻译逻辑 (兼容 OpenAI 格式)
-  const translateWithDeepSeek = async (text) => {
-    const response = await fetch("https://api.deepseek.com/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { role: "system", content: "你是一个专业的字幕翻译专家。请将输入的英文翻译成中文，只输出翻译结果，不要有任何解释。" },
-          { role: "user", content: text }
-        ],
-        temperature: 0.3
-      })
-    });
-    const data = await response.json();
-    return data.choices[0].message.content.trim();
-  };
-
-  const formatSrtTime = (srtTime) => {
-    let [hms, ms] = srtTime.trim().split(',');
-    const parts = hms.split(':');
-    const h = parseInt(parts[0], 10);
-    return `${h}:${parts[1]}:${parts[2]}.${ms.substring(0, 2)}`;
-  };
-
-  const processFile = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (engine === 'deepseek' && !apiKey) {
-      alert("请先输入 DeepSeek API Key");
-      return;
+const processFile = async (e) => {
+    // ... 前面读取文件的代码保持不变 ...
+    
+    // 1. 将字幕块分组，每 20 条为一组 (Batch)
+    const batchSize = 20;
+    const groups = [];
+    for (let i = 0; i < blocks.length; i += batchSize) {
+      groups.push(blocks.slice(i, i + batchSize));
     }
 
-    setLoading(true);
-    const reader = new FileReader();
+    let assEvents = "";
+    for (let j = 0; j < groups.length; j++) {
+      setStatus(`正在处理第 ${j + 1}/${groups.length} 组...`);
+      
+      // 2. 将这一组的文本合并成一个大字符串，用特殊符号分隔
+      const currentGroup = groups[j];
+      const textsToTranslate = currentGroup.map(b => {
+        const lines = b.split('\n');
+        return lines.slice(lines.findIndex(l => l.includes('-->')) + 1).join(' ');
+      }).filter(t => t.trim() !== "");
 
-    reader.onload = async (event) => {
-      const blocks = event.target.result.trim().split(/\n\s*\n/);
-      let assEvents = "";
+      const combinedText = textsToTranslate.join('\n[===]\n');
 
-      for (let i = 0; i < blocks.length; i++) {
-        const lines = blocks[i].split('\n').map(l => l.trim());
-        const timeLineIndex = lines.findIndex(l => l.includes('-->'));
-        
-        if (timeLineIndex !== -1) {
-          const timeLine = lines[timeLineIndex];
-          const rawText = lines.slice(timeLineIndex + 1).join(' ');
-
-          if (rawText) {
-            const [startRaw, endRaw] = timeLine.split('-->');
-            const start = formatSrtTime(startRaw);
-            const end = formatSrtTime(endRaw);
-
-            try {
-              let translated;
-              if (engine === 'deepseek') {
-                translated = await translateWithDeepSeek(rawText);
-                // 适当延时防止 API 并发过高 (DeepSeek 限制)
-                await new Promise(resolve => setTimeout(resolve, 200));
-              } else {
-                translated = await translate(rawText, { from: "en", to: "zh" });
-              }
-              
-              assEvents += `Dialogue: 0,${start},${end},Secondary,NTP,0000,0000,0000,,${translated}\n`;
-              assEvents += `Dialogue: 0,${start},${end},Default,NTP,0000,0000,0000,,${rawText}\n`;
-            } catch (error) {
-              assEvents += `Dialogue: 0,${start},${end},Default,NTP,0000,0000,0000,,${rawText}\n`;
-            }
-          }
+      try {
+        // 3. 一次性翻译一整组
+        let translatedCombined;
+        if (engine === 'deepseek') {
+            translatedCombined = await translateWithDeepSeek(combinedText);
+        } else {
+            translatedCombined = await translate(combinedText, { from: "en", to: "zh" });
         }
-        setProgress(Math.round(((i + 1) / blocks.length) * 100));
+
+        const translatedParts = translatedCombined.split('[===]').map(t => t.trim());
+
+        // 4. 将翻译好的结果写回 ASS 格式
+        currentGroup.forEach((block, index) => {
+            const lines = block.split('\n');
+            const timeLine = lines.find(l => l.includes('-->'));
+            if (timeLine) {
+                const [startRaw, endRaw] = timeLine.split('-->');
+                const start = formatSrtTime(startRaw);
+                const end = formatSrtTime(endRaw);
+                const originalText = lines.slice(lines.indexOf(timeLine) + 1).join(' ');
+                const zhText = translatedParts[index] || "（翻译失败）";
+
+                assEvents += `Dialogue: 0,${start},${end},Secondary,NTP,0000,0000,0000,,${zhText}\n`;
+                assEvents += `Dialogue: 0,${start},${end},Default,NTP,0000,0000,0000,,${originalText}\n`;
+            }
+        });
+      } catch (error) {
+        console.error("组翻译失败", error);
       }
+      
+      setProgress(Math.round(((j + 1) / groups.length) * 100));
+    }
 
       const finalContent = ASS_HEADER + assEvents;
       const blob = new Blob([finalContent], { type: 'text/plain;charset=utf-8' });
@@ -153,3 +107,4 @@ export default function Home() {
     </div>
   );
 }
+
