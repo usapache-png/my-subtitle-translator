@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import translate from "translate";
 
 const ASS_HEADER = `[Script Info]
 Title: Bilingual Subtitles
@@ -18,6 +19,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
 
 export default function Home() {
   const [loading, setLoading] = useState(false);
+  const [engine, setEngine] = useState('deepseek');
   const [apiKey, setApiKey] = useState('');
   const [status, setStatus] = useState('等待上传');
 
@@ -25,71 +27,97 @@ export default function Home() {
     if (!t) return "0:00:00.00";
     const cleanT = t.trim().replace(',', '.');
     const p = cleanT.split(':');
-    return `${parseInt(p[0] || 0)}:${p[1] || '00'}:${p[2] || '00.00'}`;
+    if (p.length < 3) return cleanT;
+    const h = parseInt(p[0] || 0);
+    const m = p[1];
+    const sWithMs = p[2].padEnd(5, '0').substring(0, 5); // 保证 00.00 格式
+    return `${h}:${m}:${sWithMs}`;
   };
 
   const processFile = async (e) => {
     const file = e.target.files[0];
-    if (!file || !apiKey) return alert("请上传文件并输入 API Key");
+    if (!file) return;
+    if (engine === 'deepseek' && !apiKey) return alert("请填写 API Key");
 
     setLoading(true);
-    setStatus('正在解析并启动后端翻译...');
+    setStatus('正在解析字幕结构...');
 
     const reader = new FileReader();
     reader.onload = async (event) => {
-      const blocks = event.target.result.trim().split(/\n\s*\n/);
+      const content = event.target.result;
+      // 更加精准的分割逻辑
+      const blocks = content.trim().split(/\r?\n\s*\r?\n/);
       const dataStruct = [];
 
       blocks.forEach(b => {
         const lines = b.split('\n').map(l => l.trim());
         const tIdx = lines.findIndex(l => l.includes('-->'));
         if (tIdx > -1) {
-          dataStruct.push({ time: lines[tIdx], text: lines.slice(tIdx + 1).join(' ') });
+          const originalText = lines.slice(tIdx + 1).join(' ');
+          if (originalText) {
+            dataStruct.push({ time: lines[tIdx], text: originalText });
+          }
         }
       });
 
-      // 每 80 条一组，分批并行请求后端
-      const chunkSize = 80;
-      const chunks = [];
-      for (let i = 0; i < dataStruct.length; i += chunkSize) chunks.push(dataStruct.slice(i, i + chunkSize));
-
       try {
-        const allResults = await Promise.all(chunks.map(async (chunk) => {
-          const res = await fetch("/api/translate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ group: chunk, apiKey })
-          });
-          const data = await res.json();
-          
-          const translations = new Array(chunk.length).fill("");
-          const content = data.choices?.[0]?.message?.content || "";
-          content.split('\n').forEach(line => {
-            const [id, ...rest] = line.split('#');
-            const i = parseInt(id);
-            if (!isNaN(i)) translations[i] = rest.join('#').trim();
-          });
-          return translations;
-        }));
+        let finalAssEvents = "";
 
-        let assEvents = "";
-        chunks.forEach((chunk, cIdx) => {
-          chunk.forEach((item, iIdx) => {
+        if (engine === 'deepseek') {
+          const chunkSize = 50; // 减小尺寸，提高翻译精准度
+          const chunks = [];
+          for (let i = 0; i < dataStruct.length; i += chunkSize) chunks.push(dataStruct.slice(i, i + chunkSize));
+
+          const allResults = await Promise.all(chunks.map(async (chunk, idx) => {
+            setStatus(`正在并发翻译第 ${idx + 1} 组...`);
+            const res = await fetch("/api/translate", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ group: chunk, apiKey })
+            });
+            const data = await res.json();
+            
+            const translations = new Array(chunk.length).fill("");
+            const content = data.choices?.[0]?.message?.content || "";
+            content.split('\n').forEach(line => {
+              const match = line.match(/ID:(\d+)\s*\|\s*(.*)/i);
+              if (match) {
+                const i = parseInt(match[1]);
+                translations[i] = match[2].replace(/^Text:/i, '').trim();
+              }
+            });
+            return translations;
+          }));
+
+          // 组装结果
+          chunks.forEach((chunk, cIdx) => {
+            chunk.forEach((item, iIdx) => {
+              const [s, eTime] = item.time.split('-->');
+              const zh = allResults[cIdx][iIdx] || "[翻译失败]";
+              finalAssEvents += `Dialogue: 0,${formatSrtTime(s)},${formatSrtTime(eTime)},Secondary,NTP,0000,0000,0000,,${zh}\n`;
+              finalAssEvents += `Dialogue: 0,${formatSrtTime(s)},${formatSrtTime(eTime)},Default,NTP,0000,0000,0000,,${item.text}\n`;
+            });
+          });
+        } else {
+          // Google 备用模式 (免费且支持)
+          for (let i = 0; i < dataStruct.length; i++) {
+            setStatus(`Google 翻译中: ${i+1}/${dataStruct.length}`);
+            const item = dataStruct[i];
             const [s, eTime] = item.time.split('-->');
-            const zh = allResults[cIdx][iIdx] || "[翻译失败]";
-            assEvents += `Dialogue: 0,${formatSrtTime(s)},${formatSrtTime(eTime)},Secondary,NTP,0000,0000,0000,,${zh}\n`;
-            assEvents += `Dialogue: 0,${formatSrtTime(s)},${formatSrtTime(eTime)},Default,NTP,0000,0000,0000,,${item.text}\n`;
-          });
-        });
+            const zh = await translate(item.text, { from: "en", to: "zh" }).catch(() => "[Error]");
+            finalAssEvents += `Dialogue: 0,${formatSrtTime(s)},${formatSrtTime(eTime)},Secondary,NTP,0000,0000,0000,,${zh}\n`;
+            finalAssEvents += `Dialogue: 0,${formatSrtTime(s)},${formatSrtTime(eTime)},Default,NTP,0000,0000,0000,,${item.text}\n`;
+          }
+        }
 
-        const blob = new Blob([ASS_HEADER + assEvents], { type: 'text/plain;charset=utf-8' });
+        const blob = new Blob([ASS_HEADER + finalAssEvents], { type: 'text/plain;charset=utf-8' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = file.name.replace('.srt', '.ass');
         a.click();
-        setStatus('处理成功！');
+        setStatus('搞定！');
       } catch (err) {
-        setStatus('翻译出错，请检查 API Key 余额或网络');
+        setStatus('失败了，请检查网络或 Key');
       } finally {
         setLoading(false);
       }
@@ -98,20 +126,37 @@ export default function Home() {
   };
 
   return (
-    <div className="container" style={{maxWidth:'600px', margin:'50px auto', padding:'20px', fontFamily:'sans-serif'}}>
-      <h1 style={{textAlign:'center'}}>⚡️ 极速翻译 (后端代理版)</h1>
-      <input 
-        type="password" 
-        placeholder="输入 DeepSeek API Key" 
-        value={apiKey} 
-        onChange={(e) => setApiKey(e.target.value)} 
-        style={{width:'100%', padding:'12px', marginBottom:'20px', borderRadius:'8px', border:'1px solid #ddd'}}
-      />
-      <div style={{border:'2px dashed #ccc', padding:'40px', textAlign:'center', cursor:'pointer', position:'relative', borderRadius:'10px'}}>
-        <input type="file" accept=".srt" onChange={processFile} disabled={loading} style={{opacity:0, position:'absolute', inset:0}} />
-        {loading ? status : "点击这里上传 SRT 文件"}
+    <div className="container" style={{maxWidth:'600px', margin:'50px auto', padding:'30px', background:'#1a1a1a', borderRadius:'15px', color:'white'}}>
+      <h1 style={{textAlign:'center', fontSize:'24px'}}>🎬 专业双语字幕翻译</h1>
+      
+      <div style={{display:'flex', gap:'10px', marginBottom:'20px'}}>
+        <select value={engine} onChange={(e)=>setEngine(e.target.value)} style={{flex:1, padding:'10px', borderRadius:'8px', background:'#333', color:'#fff', border:'none'}}>
+          <option value="deepseek">DeepSeek (全量秒切)</option>
+          <option value="google">Google (稳健备用)</option>
+        </select>
+        {engine === 'deepseek' && (
+          <input type="password" placeholder="API Key" value={apiKey} onChange={(e)=>setApiKey(e.target.value)} style={{flex:2, padding:'10px', borderRadius:'8px', border:'1px solid #444', background:'#222', color:'#fff'}} />
+        )}
       </div>
-      {loading && <div style={{marginTop:'20px', height:'4px', background:'#eee'}}><div style={{width:'50%', height:'100%', background:'#0070f3'}}></div></div>}
+
+      <div style={{border:'2px dashed #444', padding:'50px', borderRadius:'12px', textAlign:'center', position:'relative'}}>
+        <input type="file" accept=".srt" onChange={processFile} disabled={loading} style={{opacity:0, position:'absolute', inset:0, cursor:'pointer'}} />
+        {loading ? status : "把 SRT 文件拖到这里"}
+      </div>
+
+      {loading && <div style={{marginTop:'20px', height:'4px', background:'#333', overflow:'hidden'}}><div className="loading-bar"></div></div>}
+      
+      <style jsx>{`
+        .loading-bar {
+          width: 100%; height: 100%; background: #0070f3;
+          animation: loading 2s infinite linear;
+          transform-origin: 0% 50%;
+        }
+        @keyframes loading {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+      `}</style>
     </div>
   );
 }
