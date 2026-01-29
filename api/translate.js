@@ -1,21 +1,18 @@
-// /api/translate.js
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
   
   const { group, apiKey } = req.body;
-  const payload = group.map((item, idx) => `${idx}#${item.text}`).join('\n');
+  // 关键：明确告诉 AI 必须按行翻译，禁止合并
+  const payload = group.map((item, idx) => `ID:${idx} | Text:${item.text}`).join('\n');
 
   try {
     const response = await fetch("https://api.deepseek.com/chat/completions", {
       method: "POST",
-      headers: { 
-        "Content-Type": "application/json", 
-        "Authorization": `Bearer ${apiKey}` 
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: "deepseek-chat",
         messages: [
-          { role: "system", content: "Translate to Chinese. Output: ID#Translation. No chat." },
+          { role: "system", content: "You are a professional subtitle translator. Translate the text to Chinese. Keep the 'ID:number |' prefix. Translate line by line. DO NOT merge lines. One line of input = One line of output." },
           { role: "user", content: payload }
         ],
         temperature: 0.1
