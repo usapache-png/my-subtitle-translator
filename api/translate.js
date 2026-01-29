@@ -8,13 +8,11 @@ export default async function handler(req, res) {
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: "deepseek-chat",
-        messages: [{ role: "system", content: "Translator. Output: [ID]Translation. One line per ID. No chat." }, { role: "user", content: payload }],
+        messages: [{ role: "system", content: "Translator. [ID]Translation. No chat." }, { role: "user", content: payload }],
         temperature: 0.1
       })
     });
     const data = await response.json();
     res.status(200).json(data);
-  } catch (error) {
-    res.status(500).json({ error: "DeepSeek API Error" });
-  }
+  } catch (error) { res.status(500).json({ error: "DeepSeek Error" }); }
 }
